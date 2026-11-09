@@ -1,0 +1,5 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DynamicIsland/DynamicIsland.csproj" />
+  </Folder>
+</Solution>
