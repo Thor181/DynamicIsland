@@ -36,6 +36,12 @@ public sealed class AppSettings
     public bool EnableNotifications { get; set; } = true;
     public bool HideInFullscreen { get; set; } = true;
 
+    /// <summary>
+    /// Keep the collapsed island tucked behind the nearest screen edge (top or bottom) with only a
+    /// thin sliver showing; it slides out on hover and for toasts.
+    /// </summary>
+    public bool PeekMode { get; set; }
+
     /// <summary>Palette of the animated background gradient (Off disables it).</summary>
     public GradientStyle Gradient { get; set; } = GradientStyle.Aurora;
 

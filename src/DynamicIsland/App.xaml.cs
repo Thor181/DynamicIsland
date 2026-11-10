@@ -68,6 +68,7 @@ public partial class App : Application
         _window = new IslandWindow(_viewModel, _settings, _volume);
         _window.Show();
 
+        CreateIslandMenu();
         CreateTrayIcon();
 
         _fullscreen = new FullscreenService();
@@ -80,7 +81,7 @@ public partial class App : Application
     private void ApplyFullscreenState() =>
         _window?.SetSuppressed(_settings.HideInFullscreen && _fullscreen?.IsFullscreen == true);
 
-    private void CreateTrayIcon()
+    private void CreateIslandMenu()
     {
         var autoStart = new MenuItem { Header = "Запускать вместе с Windows", IsCheckable = true, IsChecked = AutoStart.IsEnabled };
         autoStart.Click += (_, _) => AutoStart.SetEnabled(autoStart.IsChecked);
@@ -91,6 +92,14 @@ public partial class App : Application
             _settings.HideInFullscreen = hideFullscreen.IsChecked;
             _settings.Save();
             ApplyFullscreenState();
+        };
+
+        var peekMode = new MenuItem { Header = "Прятать за краем экрана", IsCheckable = true, IsChecked = _settings.PeekMode };
+        peekMode.Click += (_, _) =>
+        {
+            _settings.PeekMode = peekMode.IsChecked;
+            _settings.Save();
+            _window?.ApplyPeekMode();
         };
 
         var gradientMenu = CreateGradientMenu();
@@ -108,19 +117,34 @@ public partial class App : Application
             Process.Start(new ProcessStartInfo(AppSettings.FilePath) { UseShellExecute = true });
         };
 
-        var exit = new MenuItem { Header = "Выход" };
-        exit.Click += (_, _) => Shutdown();
-
         var menu = new ContextMenu();
         menu.Items.Add(autoStart);
         menu.Items.Add(hideFullscreen);
+        menu.Items.Add(peekMode);
         menu.Items.Add(gradientMenu);
         menu.Items.Add(equalizerMenu);
         menu.Items.Add(resetPosition);
         menu.Items.Add(new Separator());
         menu.Items.Add(openSettings);
         menu.Items.Add(new Separator());
-        menu.Items.Add(exit);
+        menu.Items.Add(CreateExitItem());
+
+        _window?.SetContextMenu(menu);
+    }
+
+    private MenuItem CreateExitItem()
+    {
+        var exit = new MenuItem { Header = "Выход" };
+        exit.Click += (_, _) => Shutdown();
+        return exit;
+    }
+
+    private void CreateTrayIcon()
+    {
+        // Settings live in the island's right-click menu; the tray keeps a way to quit
+        // even while the island is hidden (e.g. in fullscreen).
+        var menu = new ContextMenu();
+        menu.Items.Add(CreateExitItem());
 
         _tray = new TaskbarIcon
         {

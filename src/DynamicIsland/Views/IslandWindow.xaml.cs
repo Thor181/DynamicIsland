@@ -63,6 +63,12 @@ public partial class IslandWindow : Window
     // move while the island animates — only its height is trimmed at the bottom when idle.
     private Rect _region;
 
+    // Peek mode: the collapsed island hides behind the screen edge, leaving PeekSize visible.
+    private enum PeekEdge { None, Top, Bottom }
+    private const double PeekSize = 5;
+    private readonly TranslateTransform _peekShift = new();
+    private double _peekTarget;
+
     private Point? _dragStart;         // cursor (screen DIPs) when the button went down
     private Vector _dragGrabOffset;    // anchor minus cursor while dragging
     private bool _dragging;
@@ -93,12 +99,14 @@ public partial class IslandWindow : Window
         foreach (var blob in Blobs)
             blob.RenderTransform = new TranslateTransform();
         BlobLayer.RenderTransform = _gradientScale;
+        Island.RenderTransform = _peekShift;
 
         _hoverExitTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _hoverExitTimer.Tick += (_, _) =>
         {
             _hoverExitTimer.Stop();
             if (_vm.IsSeeking) return;   // don't collapse under a seek drag; re-armed when it ends
+            if (Island.ContextMenu?.IsOpen == true) return;   // re-armed when the menu closes
             _vm.IsHovered = false;
         };
 
@@ -169,6 +177,76 @@ public partial class IslandWindow : Window
         if (!_dragging)
             _anchor = AnchorFromSettings();
         UpdateWindowBounds();
+        UpdatePeek(animate: false);
+    }
+
+    /// <summary>Re-reads the peek-mode setting and tucks the island away or brings it back.</summary>
+    public void ApplyPeekMode()
+    {
+        UpdateWindowBounds();
+        UpdatePeek(animate: true);
+    }
+
+    /// <summary>Which edge the island hides behind: the one it grows from (top or bottom half).</summary>
+    private PeekEdge CurrentPeekEdge =>
+        !_settings.PeekMode || _dragging ? PeekEdge.None
+        : _anchor.Y < ScreenArea.Top + ScreenArea.Height / 2 ? PeekEdge.Top
+        : PeekEdge.Bottom;
+
+    /// <summary>The anchor actually used: in peek mode it's snapped to its edge vertically.</summary>
+    private Point EffectiveAnchor
+    {
+        get
+        {
+            var area = ScreenArea;
+            return CurrentPeekEdge switch
+            {
+                PeekEdge.Top => new Point(_anchor.X, area.Top + CompactHeight / 2),
+                PeekEdge.Bottom => new Point(_anchor.X, area.Bottom - CompactHeight / 2),
+                _ => _anchor,
+            };
+        }
+    }
+
+    /// <summary>
+    /// Slides the collapsed island behind the screen edge (leaving a thin sliver to hover), or back
+    /// out when it expands, shows a toast, is dragged, or peek mode is off.
+    /// </summary>
+    private void UpdatePeek(bool animate)
+    {
+        var edge = CurrentPeekEdge;
+        double target = 0;
+        if (edge != PeekEdge.None && _vm.Mode == IslandMode.Compact)
+        {
+            var area = ScreenArea;
+            var rect = PlaceIsland(new Size(CompactWidth, CompactHeight));
+            target = edge == PeekEdge.Top
+                ? area.Top + PeekSize - rect.Bottom
+                : area.Bottom - PeekSize - rect.Top;
+        }
+
+        if (target == _peekTarget && (animate || _peekShift.Y == target)) return;
+        bool hiding = Math.Abs(target) > Math.Abs(_peekTarget);
+        _peekTarget = target;
+
+        if (!animate)
+        {
+            _peekShift.BeginAnimation(TranslateTransform.YProperty, null);
+            _peekShift.Y = target;
+            return;
+        }
+
+        var slide = hiding
+            ? new DoubleAnimation(target, TimeSpan.FromMilliseconds(360))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseInOut },
+            }
+            // No overshoot: bouncing past the edge would leave the cursor outside for a moment.
+            : new DoubleAnimation(target, TimeSpan.FromMilliseconds(300))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+            };
+        _peekShift.BeginAnimation(TranslateTransform.YProperty, slide);
     }
 
     /// <summary>Moves the island back to its default spot (centred at the top).</summary>
@@ -224,13 +302,19 @@ public partial class IslandWindow : Window
     private Rect PlaceIsland(Size size)
     {
         var area = ScreenArea;
-        bool growDown = _anchor.Y < area.Top + area.Height / 2;
-        double left = _anchor.X - size.Width / 2;
+        var anchor = EffectiveAnchor;
+        bool growDown = anchor.Y < area.Top + area.Height / 2;
+        double left = anchor.X - size.Width / 2;
         double top = growDown
-            ? _anchor.Y - CompactHeight / 2
-            : _anchor.Y + CompactHeight / 2 - size.Height;
+            ? anchor.Y - CompactHeight / 2
+            : anchor.Y + CompactHeight / 2 - size.Height;
         left = Clamp(left, area.Left + EdgeMargin, area.Right - EdgeMargin - size.Width);
-        top = Clamp(top, area.Top + TopMargin, area.Bottom - EdgeMargin - size.Height);
+        // In peek mode the island hugs its edge: the sliver the cursor hovers stays covered by the
+        // island once it slides out, so it doesn't slip out from under the cursor and collapse.
+        var edge = CurrentPeekEdge;
+        double topGap = edge == PeekEdge.Top ? 0 : TopMargin;
+        double bottomGap = edge == PeekEdge.Bottom ? 0 : EdgeMargin;
+        top = Clamp(top, area.Top + topGap, area.Bottom - bottomGap - size.Height);
         return new Rect(left, top, size.Width, size.Height);
     }
 
@@ -254,11 +338,21 @@ public partial class IslandWindow : Window
     private void UpdateWindowBounds()
     {
         _region = PlaceIsland(new Size(MaxWindowWidth, MaxWindowHeight));
-        double height = MaxWindowHeight;
-        if (!_shrinkTimer.IsEnabled)
+
+        // In peek mode the window reaches the screen edge, so the hidden island is clipped exactly
+        // there and the sliver left showing touches the edge.
+        var edge = CurrentPeekEdge;
+        var area = ScreenArea;
+        if (edge == PeekEdge.Top)
+            _region = new Rect(_region.Left, area.Top, _region.Width, _region.Bottom - area.Top);
+        else if (edge == PeekEdge.Bottom)
+            _region = new Rect(_region.Left, _region.Top, _region.Width, area.Bottom - _region.Top);
+
+        double height = _region.Height;
+        if (!_shrinkTimer.IsEnabled && edge != PeekEdge.Bottom)
         {
             var island = PlaceIsland(_targetIslandSize);
-            height = Math.Min(MaxWindowHeight, Math.Ceiling(island.Bottom - _region.Top) + 2);
+            height = Math.Min(_region.Height, Math.Ceiling(island.Bottom - _region.Top) + 2);
         }
         SetWindowBounds(_region.Left, _region.Top, _region.Width, height);
         PositionIsland();
@@ -334,6 +428,7 @@ public partial class IslandWindow : Window
         };
 
         AnimateTo(width, height, radius, animate);
+        UpdatePeek(animate);
         SwitchPanel(panel, animate);
         UpdateEqualizer(panel == CompactMediaPanel && _vm.IsPlaying);
         UpdateGradient(animate);
@@ -848,6 +943,7 @@ public partial class IslandWindow : Window
                 Math.Abs(moved.Y) < SystemParameters.MinimumVerticalDragDistance)
                 return;
 
+            _anchor = EffectiveAnchor;   // peek mode snaps it to the edge; drag from where it's shown
             _dragging = true;
             // Keep the grab point, but within the pill: the island collapses under the cursor.
             var grab = _anchor - start;
@@ -856,6 +952,7 @@ public partial class IslandWindow : Window
                 Clamp(grab.Y, -(CompactHeight / 2 - 6), CompactHeight / 2 - 6));
             _hoverExitTimer.Stop();
             _vm.IsHovered = false;
+            UpdatePeek(animate: true);   // stays out while dragged, even in peek mode
             Island.CaptureMouse();
         }
 
@@ -884,6 +981,9 @@ public partial class IslandWindow : Window
         if (Island.IsMouseCaptured)
             Island.ReleaseMouseCapture();   // re-enters via LostMouseCapture, which is now a no-op
         SavePosition();
+        // In peek mode the island snaps to the nearest edge and tucks away once collapsed.
+        UpdateWindowBounds();
+        UpdatePeek(animate: true);
         if (Island.IsMouseOver)
             _vm.IsHovered = true;
         else
@@ -899,6 +999,18 @@ public partial class IslandWindow : Window
     }
 
     private void Island_MouseLeave(object sender, MouseEventArgs e) => _hoverExitTimer.Start();
+
+    /// <summary>Right-click menu of the island. The island stays expanded while it's open.</summary>
+    public void SetContextMenu(ContextMenu menu)
+    {
+        menu.Opened += (_, _) => _hoverExitTimer.Stop();
+        menu.Closed += (_, _) =>
+        {
+            if (!Island.IsMouseOver)
+                _hoverExitTimer.Start();
+        };
+        Island.ContextMenu = menu;
+    }
 
     private void Island_MouseWheel(object sender, MouseWheelEventArgs e)
     {
